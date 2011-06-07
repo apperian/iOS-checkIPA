@@ -1,5 +1,7 @@
 # iOS IPA Validator #
 
+### by G. Gold gold@apperian.com ###
+
 `checkipa` scans an IPA file and parses its Info.plist (in Payload directory)
 and embedded.mobileprovision files. It performs checks of expected key/value
 relationships and reports the results.
