@@ -1,0 +1,838 @@
+#!/usr/bin/env python
+#
+# Scan IPA file and parse its Info.plist and embedded.mobileprovision
+# files. Perform checks of expected key/value relationships and report
+# the results.
+#
+#
+# Copyright (c) 2011 by Apperian, Inc.  All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+#---------------------------------------------------------------------
+from pprint import pprint
+import sys
+import os
+import datetime
+import tempfile
+import shutil
+import re
+import zipfile
+import plistlib
+import optparse
+
+# leave commented for now because we're not using JSON here -- yet
+##try:
+##    import simplejson as json
+##except ImportError:
+##    import json
+
+DEFAULT_ENCODING = 'utf-8'
+VERSION_NUMBER   = '1.4'
+
+# debugging only...
+def dump(o):
+    import inspect
+    pprint(inspect.getmembers(o))
+
+#---------------------------------------------------------------------
+# UdidCheck Class
+#---------------------------------------------------------------------
+class UdidCheck(object):
+    def __init__(self, udids, provision):
+        msg = ''
+        if 'ProvisionedDevices' in provision:
+            provisioned_ids = provision['ProvisionedDevices']
+            if len(provisioned_ids) > 1:
+                delim_rx = re.compile(r'\s+')
+                udid_list = delim_rx.split(udids)
+                matches = list(set(udid_list) & set(provisioned_ids))
+
+                # SUCCESS!
+                if (len(matches) > 0):
+                    msg_a = []
+                    for u in udid_list:
+                        if u == "":
+                            continue
+                        if u in matches:
+                            msg_a.append('Provisioned: %s' % (u))
+                        else:
+                            msg_a.append('  not found: %s' % (u))
+                    msg = "\n".join(msg_a)
+
+                else:
+                    msg = 'no matching devices found'
+        else:
+            msg = 'no provisioned devices in this app'
+        self.output(msg)
+    # end __init__
+
+    def output(self, msg):
+        print("")
+        for line in msg.split("\n"):
+            print('    %s' % (line))
+        print("")
+# end UdidCheck class
+
+#---------------------------------------------------------------------
+# IntegrityCheck Class
+#---------------------------------------------------------------------
+"""This class reports and examines specific details and relationships
+between values in Info.plist and embedded.mobileprovision files"""
+class IntegrityCheck(object):
+
+    def __init__(self, params):
+        self.data         = params['info']
+        self.profile      = params['mobileprovision']
+        self.verbose      = params['verbose']
+        self.ipa_filename = params['ipa_filename']
+
+        self.PUSH_PROD_DEFAULT_KEY = 'PutYourProductionKeyHere'
+        self.PUSH_DEV_DEFAULT_KEY  = 'PutYourDevelopmentKeyHere'
+
+        self._initializeResultsData()
+
+        # run the checks
+        self.processChecks()
+
+        if self.verbose:
+            pass
+            # debug only self.verboseOutput()
+
+        self.outputReport()
+
+    def detectErrors(self):
+        results = []
+        
+        if self.errors['ipa_failure']:
+            results.append({'label': 'IPA File',
+                            'description': 'Info.plist file is not accessable'})
+
+        if self.errors['mobileprovision']:
+            results.append({'label': 'Provision Profile',
+                            'description': 'not located or accessable'})
+
+        if self.errors['mobileprovision']:
+            results.append({'label': 'Provision Profile',
+                            'description': 'not located or accessable'})
+
+        if self.errors['bundleid']:
+            results.append({'label': 'BundleID',
+                            'description': 'does not exist'})
+
+        if self.errors['bundleseed']:
+            results.append({'label': 'Bundleseed',
+                            'description': 'does not exist'})
+
+        if self.errors['appid']:
+            results.append({'label': 'AppID',
+                            'description': 'does not exist or has a problem'})
+
+        if self.errors['appid_malformed']:
+            results.append({'label': 'AppID',
+                            'description': 'formatted incorrectly'})
+
+        if self.errors['appid_bundleseed_mismatch']:
+            appid_parts = self.profile['Entitlements']['application-identifier'].split('.', 1)
+            appid_suffix = appid_parts[1]
+            bundleid_val = self.data['CFBundleIdentifier']
+            desc = 'BundleID "%s" does not match AppID "%s"' % (bundleid_val, appid_suffix)
+            results.append({'label': 'ID Mismatch', 'description': desc})
+
+        if self.errors['appid_bundleid_mismatch']:
+            results.append({'label': 'AppID',
+                            'description': 'does not match the BundleID and is not wildcard'})
+
+        if self.errors['pushdevkey']:
+            results.append({'label': 'App Catalog',
+                            'description': 'ACCAPNSDevelopmentAPIKey does not exist'})
+
+        if self.errors['pushprodkey']:
+            results.append({'label': 'App Catalog',
+                            'description': 'ACCAPNSProductionAPIKey does not exist'})
+
+        if self.errors['distmethod']:
+            results.append({'label': 'Distribution',
+                            'description': 'not Enterprise and no provisioned devices'})
+
+        if self.errors['dist_dev']:
+            results.append({'label': 'Distribution',
+                            'description': 'development profile not found'})
+
+        if self.errors['dist_missing']:
+            results.append({'label': 'Distribution',
+                            'description': 'no distribution profile found'})
+
+        if self.errors['expire_date_past']:
+            exp_desc = '%s is in the past' % (self.profile['ExpirationDate'])
+            results.append({'label': 'Expiration Date', 'description': exp_desc})
+
+        return results
+    # end detectErrors()
+
+    def detectWarnings(self):
+        results = []
+
+        if self.warnings['push']:
+            results.append({'label': 'Push Notification',
+                            'description': 'not enabled'})
+
+        if self.warnings['push_apsenv']:
+            results.append({'label': 'Push Notification',
+                            'description': 'aps-environment key is not set'})
+
+        if self.warnings['dist_dev']:
+            results.append({'label': 'Distribution',
+                            'description': "code signing Entitlements 'get-task-allow' value is set to YES; should be NO"})
+
+        if self.warnings['push_default_prodkey']:
+            results.append({'label': 'Push Notification',
+                            'description': 'App Catalog with default push production key found'})
+
+        if self.warnings['push_default_devkey']:
+            results.append({'label': 'Push Notification',
+                            'description': 'App Catalog with default push development key found'})
+
+        if self.warnings['expire_date_coming']:
+            exp_desc = '%s is rapidly approaching' % (self.profile['ExpirationDate'])
+            results.append({'label': 'Expiration Date', 'description': exp_desc})
+
+        return results
+    # end detectWarnings()
+
+    def outputReport(self):
+        report_warnings = self.detectWarnings()
+        report_errors = self.detectErrors()
+
+        vertical_spacer = ''
+
+        # Heading
+        main_heading = 'IPA File Integrity: "%s"' % (os.path.basename(self.ipa_filename))
+
+        txt = []
+        txt.append(vertical_spacer)
+        txt.append(main_heading)
+        txt.append('=' * len(main_heading))
+        txt.append(vertical_spacer)
+
+        # Info
+        provisioned_devices = self.getProvisionedDevices()
+        txt.append('Info')
+        txt.append('-' * len('Info'))
+
+        if 'CFBundleName' in self.data:
+            txt.append('  Name: %s' % (self.data['CFBundleName']))
+
+        if 'CFBundleVersion' in self.data:
+            txt.append('  Version: %s' % (self.data['CFBundleVersion']))
+
+        if ('ExpirationDate' in self.profile):
+            txt.append('  Expiration Date: %s' % (self.profile['ExpirationDate']))
+
+        if self.ipa_info['adhoc'] and not self.ipa_info['enterprise']:
+            ipa_type = 'Ad Hoc/Developer'
+        elif self.ipa_info['enterprise'] and not self.ipa_info['adhoc']:
+            ipa_type = 'Enterprise'
+        else:
+            ipa_type = 'unknown distribution type'
+            report_errors.append({'label': 'Distribution', 'description': 'unknown distribution type'})
+        txt.append('  Distribution Profile Type: %s' % (ipa_type))
+
+        if len(provisioned_devices) > 0:
+            txt.append('  Provisioned Devices (%d): ' % (len(provisioned_devices)))
+            for udid in provisioned_devices:
+                txt.append('  %s' % (udid))
+        else:
+            txt.append('  Provisioned Devices (0):')
+
+        txt.append(vertical_spacer)
+
+        # Warnings
+        txt.append('Warnings')
+        txt.append('-' * len('Warnings'))
+        if len(report_warnings) == 0:
+            txt.append('  none')
+        else:
+            for w in report_warnings:
+                txt.append('  %s: %s' % (w['label'], w['description']))
+
+        txt.append(vertical_spacer)
+
+        # Errors
+        txt.append('Errors')
+        txt.append('-' * len('Errors'))
+        if len(report_errors) == 0:
+            txt.append('  none')
+        else:
+            for w in report_errors:
+                txt.append('  %s: %s' % (w['label'], w['description']))
+
+        txt.append(vertical_spacer) 
+
+        for line in txt:
+            print('    %s' % (line))
+
+    # end outputReport
+
+    def getProvisionedDevices(self):
+        if 'ProvisionedDevices' in self.profile:
+            return self.profile['ProvisionedDevices']
+        else:
+            return []
+
+    def processChecks(self):
+        self.checkBundleID()
+        self.checkBundleSeed()
+        self.checkAppID()
+        self.checkPush()
+        self.checkDistMethod()
+        self.checkDistProfile()
+        self.checkExpirationDate()
+
+    def checkExpirationDate(self):
+        if ('ExpirationDate' in self.profile):
+            WARNING_PERIOD_IN_DAYS = 14
+            expire_date = self.profile['ExpirationDate']
+            difference_date = expire_date - datetime.datetime.today()
+            days_until_expire = difference_date.days + 1
+            if (days_until_expire > 0) and (days_until_expire <= WARNING_PERIOD_IN_DAYS):
+                self.warnings['expire_date_coming'] = True
+            elif days_until_expire <= 0:
+                self.errors['expire_date_past'] = True
+
+    # Checks whether a distribution certificate or a developer
+    # certificate is present in mobileprovision    
+    #
+    # Development signed apps typically set the 'get-task-allow' to True
+    #
+    # FIXME: 'dist_dev' should be conditionally set to errors or
+    #         warnings, depending if we're in an Enterprise context
+    #         or not. For now, we're choosing warnings as if we're
+    #         in a developer context.
+    def checkDistProfile(self):
+        if 'get-task-allow' in self.profile['Entitlements']:
+            if self.profile['Entitlements']['get-task-allow']: # boolean, should be False
+                self.warnings['dist_dev'] = True
+        else:
+            self.errors['dist_missing'] = True
+    # end checkDistProfile
+
+    def checkPush(self):
+        pushprodkey = None
+        pushdevkey = None
+        appid = None
+
+        if 'Entitlements' in self.profile:
+            if 'application-identifier' in self.profile['Entitlements']:
+                appid = self.profile['Entitlements']['application-identifier']
+            else:
+                self.warnings['push'] = True
+        else:
+            self.warnings['push'] = True
+
+        if 'Entitlements' in self.profile:
+            if 'aps-environment' not in self.profile['Entitlements']:
+                self.warnings['push'] = True
+                self.warnings['push_apsenv'] = True
+
+
+        # if app catalog - is this condition necessary?
+        appcatalog_rx = re.compile(r'appcatalog$', re.IGNORECASE)
+        if appcatalog_rx.search(self.data['CFBundleIdentifier']): # app catalog
+            if 'ACCAPNSDevelopmentAPIKey' in self.data:
+                pushdevkey = self.data['ACCAPNSDevelopmentAPIKey']
+            else:
+                self.errors['pushdevkey'] = True
+
+            if 'ACCAPNSProductionAPIKey' in self.data:
+                pushprodkey= self.data['ACCAPNSProductionAPIKey']
+            else:
+                self.errors['pushprodkey'] = True
+
+            if pushprodkey != None:
+                if pushprodkey == self.PUSH_PROD_DEFAULT_KEY:
+                    self.warnings['push'] = True
+                    self.warnings['push_default_prodkey'] = True
+
+            if pushdevkey != None:
+                if pushdevkey == self.PUSH_DEV_DEFAULT_KEY:
+                    self.warnings['push'] = True
+                    self.warnings['push_default_devkey'] = True
+        # end if app catalog
+
+        if appid != None:
+            # split on only 1 (the first) period, thus returning 2
+            # elements, if valid appid format
+            appid_vals = appid.split('.', 1)
+
+            # wildcard appid, not allowed for push
+            if len(appid_vals) != 2:
+                self.warnings['push'] = True
+            elif appid_vals[1] == '*':
+                self.ipa_info['wildcard'] = True
+                self.warnings['push'] = True
+    # end checkPush()
+
+    def checkAppID(self):
+        bundleseed = None
+        bundleid = None
+        appid = None
+
+        if 'ApplicationIdentifierPrefix' in self.profile:
+            if len(self.profile['ApplicationIdentifierPrefix']) > 0:
+                bundleseed = self.profile['ApplicationIdentifierPrefix'][0]
+        else:
+            self.errors['appid'] = True
+
+        if 'CFBundleIdentifier' in self.data:
+            bundleid = self.data['CFBundleIdentifier']
+
+        if 'Entitlements' in self.profile:
+            if 'application-identifier' in self.profile['Entitlements']:
+                appid = self.profile['Entitlements']['application-identifier']
+            else:
+                self.errors['appid'] = True
+        else:
+            self.errors['appid'] = True
+
+        if appid != None:
+            # split on only 1 (the first) period, thus returning 2
+            # elements, if valid appid format
+            appid_vals = appid.split('.', 1)
+
+            # wildcard appid, not allowed for push
+            if len(appid_vals) != 2:
+                # malformed appid: must have value.value
+                self.errors['appid'] = True
+                self.errors['appid_malformed'] = True
+            elif appid_vals[1] == '*':
+                self.ipa_info['wildcard'] = True
+
+            # mismatch in mobileprovision profile
+            if (bundleseed != None) and (len(appid_vals) > 0):
+                if bundleseed != appid_vals[0]:
+                    self.errors['appid_bundleseed_mismatch'] = True
+
+            # mismatch between info.plist and mobileprovision
+            if (bundleid != None) and (len(appid_vals) > 1) and not (self.ipa_info['wildcard']):
+                appid_suffix = appid_vals[1] # appid, excluding bundle seed id
+                if not self.isBundleIDMatchAgainstAppID(bundleid, appid_suffix):
+                    self.errors['appid_bundleseed_mismatch'] = True
+    # end checkAppID
+
+    # Apple's specified Entitlement app id is a string
+    # _pattern_ against which the bundle id must match; the
+    # two values do not have to be exactly the same. Example:
+    #
+    #     app id (excluding bundle seed id): com.apperian.*
+    #                             bundle id: com.apperian.AppCatalog
+    #
+    # In this example there is no mismatch because the app
+    # id's '*' wildcard allows any string to be used at that
+    # part of the reverse domain string pattern.
+    #
+    # return boolean
+    def isBundleIDMatchAgainstAppID(self, bundleid, appid):
+        if re.compile(r'\*').search(appid):
+
+            wildcard_match = re.compile(r'[^*]+').search(appid)
+
+            if wildcard_match != None:
+                non_wildcard_str = wildcard_match.group()
+                appid_parts = appid.split('*', 1)
+                bundleid_match = re.compile(r'^%s' % (appid_parts[0])).search(bundleid)
+                return bundleid_match != None
+
+            # appid is only '*'; bundle id will always match
+            else:
+                return True
+
+        # no wildcard; must be exact match
+        else:
+            return appid == bundleid
+    # end isBundleIDMatchAgainstAppID
+
+    # if 'CFBundleIdentifier' key exists and is blank string: error
+    # if 'CFBundleIdentifier' key not exists: error
+    def checkBundleID(self):
+        if 'CFBundleIdentifier' in self.data:
+            if self.data['CFBundleIdentifier'].strip() == "":
+                self.errors['bundleid'] = True
+        else: # key missing
+            self.errors['bundleid'] = True
+
+    def checkBundleSeed(self):
+        if 'ApplicationIdentifierPrefix' in self.profile:
+            app_id_prefix = self.profile['ApplicationIdentifierPrefix'];
+            if len(app_id_prefix) >= 1:
+                if app_id_prefix[0].strip() == "":
+                    self.errors['bundleseed'] = True
+            else:
+                self.errors['bundleseed'] = True
+        else:
+            self.errors['bundleseed'] = True
+
+    def checkDistMethod(self):
+        if 'ProvisionsAllDevices' in self.profile:
+            self.ipa_info['enterprise'] = True
+        elif 'ProvisionedDevices' in self.profile:
+            self.ipa_info['adhoc'] = True
+        else:
+            self.errors['distmethod'] = True
+
+    def _initializeResultsData(self):
+        """All errors and warnings are to be declared here and set to false.
+        As new rules are discovered, they can be added here, and then
+        they can be handled by the caller.
+
+        ipa_failure => The IPA file was not able to extract correctly, or
+                       did not conatin an info.plist
+
+        mobileprovision => The embedded.mobileprovision file was not found
+                           and thus the IPA does not have a provisioning profile
+
+        bundleid => Bundleid key in info.plist either doesn't exist or is
+                    and empty string
+
+        bundleseed => The bundleseed in mobileprovision either doesn't exist
+                      or is an empty string
+
+        appid => The appid in mobileprovision has an error that makes it
+                 unacceptable, explained in further errors
+
+        appid_malformed => The appid is not in the form of String.String
+
+        appid_bundleseed_mismatch => The appid is not match the bundleseed
+                                     in the first value
+
+        appid_bundleid_mismatch => The appid is not a wildcard and doesn't
+                                   match the bundleid in the second value
+
+        pushdevkey => This is an App Catalog and the ACCAPNSDevelopmentAPIKey
+                      does not exist in info.plist
+    
+        pushprodkey => This is an app catalog and the ACCAPNSProductionAPIKey
+                       does not exist in info.plist
+
+        distmethod => The app does not have a ProvisionedDevices (ad hoc) or
+                      ProvisionsAllDevices key
+    
+        dist_dev => This app has a development distribution profile and cannot be
+                    distributed
+
+        dist_missing => This app is missing a distribution profile
+
+        expire_date_past => Expiration date < tomorrow
+        """ 
+        self.errors = {
+            "ipa_failure":               False,
+            "mobileprovision":           False,
+            "bundleid":                  False,
+            "bundleseed":                False,
+            "appid":                     False,
+            "appid_malformed":           False,
+            "appid_bundleseed_mismatch": False,
+            "appid_bundleid_mismatch":   False,
+            "pushdevkey":                False,
+            "pushprodkey":               False,
+            "distmethod":                False,
+            "dist_dev":                  False,
+            "dist_missing":              False,
+            "expire_date_past":          False
+            }
+
+        """
+
+        push => Push is disabled for this app
+
+        push_apsenv => The aps-environment key is not set and thus push disabled
+
+        push_default_prodkey => This is an app catalog and the default
+                                ACCAPNSProductionAPIKey was found
+
+        push_default_devkey => This is an app catalog and the default
+                               ACCAPNSDevelopmentAPIKey was found
+
+        expire_date_coming => The expire date is within 14 days of current date
+        """        
+        self.warnings = {
+            "push":                 False,
+            "push_apsenv":          False,
+            "push_default_prodkey": False,
+            "push_default_devkey":  False,
+            "dist_dev":             False,
+            "expire_date_coming":   False
+            }
+
+
+        """
+        IPA info contains information about the IPA that is unrelated to
+        errors or warnings, such as if it's an App Catalog or is a wildcard
+        application (meaning push is disabled)
+        
+        app_catalog => This application is an App Catalog
+
+        wildcard => This application has a wildcard provisioning profile
+                    meaning push is disabled
+
+
+        enterprise => This app has an Enterprise distribution profile
+
+        adhoc => This app has an Ad hoc distribution profile
+        """
+        self.ipa_info = {
+            "app_catalog": False,
+            "wildcard":    False,
+            "enterprise":  False,
+            "adhoc":       False
+            }
+    #end initializeResultsData
+
+    def verboseOutput(self):
+        print('')
+        print('INFO:')
+        pprint(self.ipa_info)
+        print('')
+
+        print('WARNINGS:')
+        pprint(self.warnings)
+        print('')
+
+        print('ERRORS:')
+        pprint(self.errors)
+        print('')
+
+        print('checks completed: items marked True are problematic.')
+# end IntegrityCheck class
+
+#---------------------------------------------------------------------
+# ParseIPA class
+#---------------------------------------------------------------------
+class ParseIPA(object):
+
+    def __init__(self, ipa_filename):
+        self.InfoPlistData            = {}
+        self.ProvisionData            = {}
+        self.errors                   = []
+        self.ipa_filename             = ipa_filename
+        self.full_path_plist_filename = ''
+        self.temp_directory           = ''
+        self.plist_file_RX            = re.compile(r'Payload/.+?\.app/Info.plist$')
+        self.XML_RX                   = re.compile(r'<xml')
+        self.provision_file_RX        = re.compile(r'\bembedded.mobileprovision$')
+        self.provision_XML_RX         = re.compile(r'<\?xml.+</plist>', re.DOTALL)
+
+    def getFilenameFromIPA(self, filetype):
+        z = zipfile.ZipFile(self.ipa_filename, 'r')
+
+        if filetype == 'Info':
+            rx = self.plist_file_RX
+        else:
+            rx = self.provision_file_RX
+
+        filenames = z.namelist()
+        filename = ''
+        for fname in filenames:
+            if rx.search(fname):
+                filename = fname
+                break
+        return {'filename': filename, 'zip_obj': z}
+    # end getFilenameFromIPA()
+
+    def extractProvisionData(self):
+        extract_info = self.getFilenameFromIPA('Provision')
+        z = extract_info['zip_obj']
+        provision_filename = extract_info['filename']
+
+        data = {}
+        if provision_filename == '':
+            self.errors.append('embedded.mobileprovision file not found in IPA')
+        else:
+            content = z.read(provision_filename)
+            match = self.provision_XML_RX.search(content)
+            if (match != None):
+                provision_xml_content = match.group()
+                data = plistlib.readPlistFromString(provision_xml_content)
+            else:
+                self.errors.append('unable to parse embedded.mobileprovision file')
+
+        self.ProvisionData = data
+    # end extractProvisionData
+
+    def extractInfoPlistData(self):
+        extract_info = self.getFilenameFromIPA('Info')
+        z = extract_info['zip_obj']
+        plist_filename = extract_info['filename']
+
+        data = {}
+        if plist_filename == '':
+            self.errors.append('Info.plist file not found in IPA')
+        else:
+            content = z.read(plist_filename)
+
+            if (self.XML_RX.match(content)):
+                data = plistlib.readPlistFromString(content)
+            else:
+                self.temp_directory = tmp_dir = tempfile.mkdtemp()
+
+                z.extract(plist_filename, self.temp_directory)
+                fullpath_plist = '%s/%s' % (self.temp_directory, plist_filename)
+
+                os_info = os.uname()
+                if os_info[0] == 'Linux':
+                    cmd = 'plutil -i "%s" -o "%s"' % (fullpath_plist, fullpath_plist)
+                else:
+                    cmd = 'plutil -convert xml1 "%s"' % (fullpath_plist)
+
+                os.system(cmd)
+                data = plistlib.readPlist(fullpath_plist)
+        # end if plist == ''
+
+        self.InfoPlistData = data
+    # end extractPlist()
+
+    def isValidZipArchive(self):
+        return zipfile.is_zipfile(self.ipa_filename)
+
+# end ParseIPA class
+
+def get_options():
+    version_info = 'checkipa: version %s' % (VERSION_NUMBER)
+    p = optparse.OptionParser(version=version_info)
+
+    p.add_option('-i', '--ipafile', action='store', dest='input_file',
+                 help = '''provide IPA filename
+                        ''')
+
+    p.add_option('-u', '--udids', action='store', dest='udids',
+                 help = '''check if udids are provisioned
+                        ''')
+
+    p.add_option('-v', '--verbose', action='store_true',
+                 dest='verbose', default=False,
+                 help = '''print data structures to stdout
+                        ''')
+
+    opts, args = p.parse_args()
+    return opts
+# end get_options
+
+def main():
+
+    #---------------------------------------------------------------------
+    # get command line arguments
+    #---------------------------------------------------------------------
+    options      = get_options()
+    ipa_filename = options.input_file
+    verbose      = options.verbose
+    udids        = options.udids
+
+    if udids is None or udids == "":
+        check_udids = False
+    else:
+        check_udids = True
+
+    errors = []
+
+    # allow no "-i" switch for IPA filename if only a single argument
+    if ipa_filename == None:
+        if len(sys.argv) > 1:
+            ipa_filename = sys.argv[1]
+        else:
+            ipa_filename = ''
+
+    if not os.path.exists(ipa_filename):
+        errors.append('valid input filename not provided')
+
+    #---------------------------------------------------------------------
+    # Instantiate class and perform basic checks before parsing
+    #---------------------------------------------------------------------
+    if len(errors) == 0:
+        parse = ParseIPA(ipa_filename)
+
+        if not parse.isValidZipArchive():
+            errors.append('not a valid zip archive [%s]' % (ipa_filename))
+
+        # Mac OS already should have the plutil command utility installed.
+        # The following message is primarily for (Debian-based) Linux systems.
+        rv = os.system('which plutil >/dev/null')
+        if rv != 0:
+            msg =  "The program 'plutil' is currently not installed. You can install it by typing:\n"
+            msg += '           sudo apt-get install libplist-utils'
+            errors.append(msg)
+
+    #---------------------------------------------------------------------
+    # print out pre-parse errors
+    #---------------------------------------------------------------------
+    if len(errors) > 0:
+        print('')
+        for error in errors:
+            print('    Error: %s' % (error))
+        print("""\n    Usage: $ checkipa -i <filename> [-u "udid udid"] [-v]\n""")
+        sys.exit(-1)
+    # end if errors
+
+    #---------------------------------------------------------------------
+    # No Errors (yet) - begin program with user-defined parameters
+    #---------------------------------------------------------------------
+    parse.extractInfoPlistData()
+    parse.extractProvisionData()
+
+    if len(parse.errors) == 0:
+
+        #---------------------------------------------------------------------
+        # verbose output
+        #---------------------------------------------------------------------
+        if verbose:
+            print('Info.plist')
+            pprint(parse.InfoPlistData)
+            print('')
+            print('embedded.mobileprovision')
+            pprint(parse.ProvisionData)
+
+        #---------------------------------------------------------------------
+        # check provisioned devices
+        #---------------------------------------------------------------------
+        if check_udids:
+            u = UdidCheck(udids, parse.ProvisionData)
+        else:
+            #---------------------------------------------------------------------
+            # check integrity
+            #---------------------------------------------------------------------
+            params = {'info': parse.InfoPlistData,
+                      'mobileprovision': parse.ProvisionData,
+                      'verbose': verbose, 'ipa_filename': ipa_filename}
+            check = IntegrityCheck(params)
+        # end if check_udids
+            
+        # clean up tmp directory tree
+        try:
+            if parse.temp_directory != '':
+                shutil.rmtree(parse.temp_directory)
+        except:
+            pass
+    else:
+        pprint(parse.errors)
+# end main()
+
+if __name__ == '__main__':
+    main()
+    sys.exit(0)
