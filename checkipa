@@ -511,9 +511,6 @@ class IntegrityCheck(object):
 
         push_apsenv => The aps-environment key is not set and thus push disabled
 
-        push_default_devkey => This is an app catalog and the default
-                               ACCAPNSDevelopmentAPIKey was found
-
         expire_date_coming => The expire date is within 14 days of current date
         """        
         self.warnings = {
