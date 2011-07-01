@@ -46,7 +46,7 @@ import optparse
 ##    import json
 
 DEFAULT_ENCODING = 'utf-8'
-VERSION_NUMBER   = '1.4'
+VERSION_NUMBER   = '1.5'
 
 # debugging only...
 def dump(o):
