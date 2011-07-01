@@ -105,9 +105,6 @@ class IntegrityCheck(object):
         self.verbose      = params['verbose']
         self.ipa_filename = params['ipa_filename']
 
-        self.PUSH_PROD_DEFAULT_KEY = 'PutYourProductionKeyHere'
-        self.PUSH_DEV_DEFAULT_KEY  = 'PutYourDevelopmentKeyHere'
-
         self._initializeResultsData()
 
         # run the checks
@@ -161,14 +158,6 @@ class IntegrityCheck(object):
             results.append({'label': 'AppID',
                             'description': 'does not match the BundleID and is not wildcard'})
 
-        if self.errors['pushdevkey']:
-            results.append({'label': 'App Catalog',
-                            'description': 'ACCAPNSDevelopmentAPIKey does not exist'})
-
-        if self.errors['pushprodkey']:
-            results.append({'label': 'App Catalog',
-                            'description': 'ACCAPNSProductionAPIKey does not exist'})
-
         if self.errors['distmethod']:
             results.append({'label': 'Distribution',
                             'description': 'not Enterprise and no provisioned devices'})
@@ -202,14 +191,6 @@ class IntegrityCheck(object):
         if self.warnings['dist_dev']:
             results.append({'label': 'Distribution',
                             'description': "code signing Entitlements 'get-task-allow' value is set to YES; should be NO"})
-
-        if self.warnings['push_default_prodkey']:
-            results.append({'label': 'Push Notification',
-                            'description': 'App Catalog with default push production key found'})
-
-        if self.warnings['push_default_devkey']:
-            results.append({'label': 'Push Notification',
-                            'description': 'App Catalog with default push development key found'})
 
         if self.warnings['expire_date_coming']:
             exp_desc = '%s is rapidly approaching' % (self.profile['ExpirationDate'])
@@ -336,8 +317,6 @@ class IntegrityCheck(object):
     # end checkDistProfile
 
     def checkPush(self):
-        pushprodkey = None
-        pushdevkey = None
         appid = None
 
         if 'Entitlements' in self.profile:
@@ -352,31 +331,6 @@ class IntegrityCheck(object):
             if 'aps-environment' not in self.profile['Entitlements']:
                 self.warnings['push'] = True
                 self.warnings['push_apsenv'] = True
-
-
-        # if app catalog - is this condition necessary?
-        appcatalog_rx = re.compile(r'appcatalog$', re.IGNORECASE)
-        if appcatalog_rx.search(self.data['CFBundleIdentifier']): # app catalog
-            if 'ACCAPNSDevelopmentAPIKey' in self.data:
-                pushdevkey = self.data['ACCAPNSDevelopmentAPIKey']
-            else:
-                self.errors['pushdevkey'] = True
-
-            if 'ACCAPNSProductionAPIKey' in self.data:
-                pushprodkey= self.data['ACCAPNSProductionAPIKey']
-            else:
-                self.errors['pushprodkey'] = True
-
-            if pushprodkey != None:
-                if pushprodkey == self.PUSH_PROD_DEFAULT_KEY:
-                    self.warnings['push'] = True
-                    self.warnings['push_default_prodkey'] = True
-
-            if pushdevkey != None:
-                if pushdevkey == self.PUSH_DEV_DEFAULT_KEY:
-                    self.warnings['push'] = True
-                    self.warnings['push_default_devkey'] = True
-        # end if app catalog
 
         if appid != None:
             # split on only 1 (the first) period, thus returning 2
@@ -526,12 +480,6 @@ class IntegrityCheck(object):
         appid_bundleid_mismatch => The appid is not a wildcard and doesn't
                                    match the bundleid in the second value
 
-        pushdevkey => This is an App Catalog and the ACCAPNSDevelopmentAPIKey
-                      does not exist in info.plist
-    
-        pushprodkey => This is an app catalog and the ACCAPNSProductionAPIKey
-                       does not exist in info.plist
-
         distmethod => The app does not have a ProvisionedDevices (ad hoc) or
                       ProvisionsAllDevices key
     
@@ -551,8 +499,6 @@ class IntegrityCheck(object):
             "appid_malformed":           False,
             "appid_bundleseed_mismatch": False,
             "appid_bundleid_mismatch":   False,
-            "pushdevkey":                False,
-            "pushprodkey":               False,
             "distmethod":                False,
             "dist_dev":                  False,
             "dist_missing":              False,
@@ -565,9 +511,6 @@ class IntegrityCheck(object):
 
         push_apsenv => The aps-environment key is not set and thus push disabled
 
-        push_default_prodkey => This is an app catalog and the default
-                                ACCAPNSProductionAPIKey was found
-
         push_default_devkey => This is an app catalog and the default
                                ACCAPNSDevelopmentAPIKey was found
 
@@ -576,8 +519,6 @@ class IntegrityCheck(object):
         self.warnings = {
             "push":                 False,
             "push_apsenv":          False,
-            "push_default_prodkey": False,
-            "push_default_devkey":  False,
             "dist_dev":             False,
             "expire_date_coming":   False
             }
