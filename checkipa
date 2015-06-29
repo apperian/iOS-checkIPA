@@ -572,7 +572,7 @@ class IntegrityCheck(object):
 #---------------------------------------------------------------------
 class ParseIPA(object):
 
-    plist_file_rx = re.compile(r'Payload/.+?\.app/Info.plist$')
+    plist_file_rx = re.compile(r'[Pp]ayload/.+?\.app/Info.plist$')
     provision_file_rx = re.compile(r'\bembedded.mobileprovision$')
     xml_rx = re.compile(r'<\??xml')
     provision_xml_rx = re.compile(r'<\?xml.+</plist>', re.DOTALL)
