@@ -572,7 +572,8 @@ class IntegrityCheck(object):
 #---------------------------------------------------------------------
 class ParseIPA(object):
 
-    plist_file_rx = re.compile(r'[Pp]ayload/.+?\.app/Info.plist$')
+    plist_file_rx = re.compile(r'Payload/.+?\.app/Info.plist$')
+    plist_misnamed_payload_file_rx = re.compile(r'payload/.+?\.app/Info.plist$')
     provision_file_rx = re.compile(r'\bembedded.mobileprovision$')
     xml_rx = re.compile(r'<\??xml')
     provision_xml_rx = re.compile(r'<\?xml.+</plist>', re.DOTALL)
@@ -590,6 +591,8 @@ class ParseIPA(object):
 
         if filetype == 'Info':
             regx = ParseIPA.plist_file_rx
+        elif filetype == 'Misnamed_Payload_Check':
+            regx = ParseIPA.plist_misnamed_payload_file_rx
         else:
             regx = ParseIPA.provision_file_rx
 
@@ -629,7 +632,10 @@ class ParseIPA(object):
 
         data = {}
         if plist_filename == '':
-            self.errors.append('Info.plist file not found in IPA')
+            if self.get_filename_from_ipa('Misnamed_Payload_Check')['filename'] != '':
+                self.errors.append("Payload folder is misnamed 'payload' (lower-case p). Rename to 'Payload'")
+            else:
+                self.errors.append('Info.plist file not found in IPA')
         else:
             content = zip_obj.read(plist_filename)
             if (ParseIPA.xml_rx.match(content)):
