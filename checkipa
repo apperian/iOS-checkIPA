@@ -199,7 +199,7 @@ class IntegrityCheck(object):
             results.append({'label': 'Push Notification',
                             'description': 'aps-environment key is not set'})
 
-        if True or self.warnings['dist_dev']:
+        if self.warnings['dist_dev']:
             dist_warn_desc = "code signing Entitlements 'get-task-allow' value is set to YES; should be NO"
             results.append({'label': 'Distribution',
                             'description': dist_warn_desc})
